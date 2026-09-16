@@ -44,8 +44,10 @@ def parse_dxf(content: bytes) -> list[dict[str, Any]]:
         record: dict[str, Any] = {
             "id": f"{entity_type.lower()}_{index}",
             "entity_type": entity_type,
+            "source_handle": entity.dxf.get("handle"),
             "layer": entity.dxf.get("layer", "0"),
             "bbox": entity_bbox,
+            "properties": {},
         }
 
         if entity_type == "LINE":
@@ -85,12 +87,30 @@ def parse_dxf(content: bytes) -> list[dict[str, Any]]:
 
         if entity_type in {"TEXT", "MTEXT"}:
             record["text"] = entity.dxf.get("text", "")
+            record["raw_text"] = record["text"]
+            record["text_metadata"] = {
+                "rotation": float(entity.dxf.get("rotation", 0.0)),
+                "height": float(entity.dxf.get("height", entity.dxf.get("char_height", 0.0))),
+                "style": entity.dxf.get("style", "Standard"),
+            }
             record["geometry"] = {
                 "kind": "text",
                 "point": _point(entity.dxf.insert),
             }
+        elif entity_type == "INSERT":
+            record["block_name"] = str(entity.dxf.get("name", ""))
+            record["insert_metadata"] = {
+                "rotation": float(entity.dxf.get("rotation", 0.0)),
+                "scale": [
+                    float(entity.dxf.get("xscale", 1.0)),
+                    float(entity.dxf.get("yscale", 1.0)),
+                    float(entity.dxf.get("zscale", 1.0)),
+                ],
+                "point": _point(entity.dxf.insert),
+            }
         elif entity_type == "DIMENSION":
             record["text"] = entity.dxf.get("text", "")
+            record["raw_text"] = record["text"]
             record["dimension_type"] = int(entity.dxf.get("dimtype", 0)) & 0x0F
             dimension_geometry: list[dict[str, Any]] = []
             try:

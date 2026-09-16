@@ -1,0 +1,32 @@
+{
+  "drawing_id": "drawing_ebfc4ef35bf7",
+  "project_id": "project_07a313095a7f",
+  "filename": "sample.dxf",
+  "metadata": {
+    "dxf_version": "R12",
+    "units": "Millimeters"
+  },
+  "entities": [
+    {
+      "id": "entity_1",
+      "entity_type": "LINE",
+      "layer": "0",
+      "bbox": [
+        0.0,
+        0.0,
+        1.0,
+        1.0
+      ],
+      "geometry": {
+        "start": [
+          0.0,
+          0.0
+        ],
+        "end": [
+          1.0,
+          1.0
+        ]
+      }
+    }
+  ]
+}

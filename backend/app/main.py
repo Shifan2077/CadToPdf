@@ -5,9 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes_upload import router as upload_router
 from app.api.routes_analysis import router as analysis_router
-from app.api.routes_pdf import router as pdf_router
+from app.api.routes_preview import router as preview_router
+from app.api.routes_projects import router as projects_router
 
-app = FastAPI(title="CAD-to-PDF Framing MVP")
+app = FastAPI(title="ARECON CAD Analyzer")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,7 +20,9 @@ app.add_middleware(
 
 app.include_router(upload_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
-app.include_router(pdf_router, prefix="/api")
+app.include_router(preview_router, prefix="/api")
+app.include_router(projects_router, prefix="/api")
+# PDF generation is Phase 2 and intentionally not registered in the active app.
 
 
 @app.get("/health")

@@ -8,6 +8,7 @@ from reportlab.lib.pagesizes import landscape
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
+# PHASE 2 — CURRENTLY DISABLED. The active application does not import this renderer.
 
 def _transform(point: list[float], bounds: tuple[float, float, float, float], scale: float, left: float, bottom: float) -> tuple[float, float]:
     return (

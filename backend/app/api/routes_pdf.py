@@ -10,6 +10,7 @@ from app.cad.pdf_renderer import render_drawing_pdf
 from app.cad.storage import drawings
 from app.detection.drawing_detector import DrawingDetector
 
+# PHASE 2 — CURRENTLY DISABLED. This router is intentionally not registered in app.main.
 router = APIRouter()
 
 

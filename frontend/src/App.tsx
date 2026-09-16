@@ -2,208 +2,30 @@ import { useState } from 'react'
 import './App.css'
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? '/api'
+type Drawing = { id: string; filename: string; status: string; error?: string; file_size?: number }
+type Project = { id: string; name: string; drawings: Drawing[] }
+type Analysis = { file: { name: string; size_bytes: number; dxf_version: string; units: string; layer_count: number; block_count: number; layouts: string[]; entity_counts: Record<string, number> }; entities_detected: number; dimensions_detected: number; dimensions: Array<{ id: string; value?: number; text?: string; status: string; layer?: string }>; layers: Array<{ name: string; entity_count: number; entity_types: string[] }>; geometry_summary: { total_line_length: number; closed_polylines: number; open_polylines: number; circle_count: number }; bbox: [number, number, number, number]; drawing_size: { width: number; height: number }; entities: Array<{ id: string; geometry?: { kind?: string; start?: number[]; end?: number[]; points?: number[][]; center?: number[]; radius?: number } }> }
+const formatNumber = (value: number) => value.toFixed(2).replace(/\.?0+$/, '')
+const formatBytes = (value: number) => `${(value / 1024).toFixed(1)} KB`
+const apiError = async (response: Response, fallback: string) => { try { return ((await response.json()) as { detail?: string }).detail ?? fallback } catch { return fallback } }
 
-type Analysis = {
-  upload_id: string
-  entities_detected: number
-  candidate_drawing_clusters: number
-  dimensions_detected: number
-  detailed_dimensions: number[]
-  annotations_detected: number
-  selected_primary_cluster: string
-  drawing_size: { width: number; height: number }
-  bbox: [number, number, number, number]
-}
-
-type PdfResult = {
-  status: string
-  filename: string
-}
-
-type UploadResult = {
-  upload_id: string
-}
-
-const getApiError = async (response: Response, fallback: string) => {
-  try {
-    const body = (await response.json()) as { detail?: string }
-    return body.detail ?? fallback
-  } catch {
-    return fallback
-  }
+function Preview({ analysis }: { analysis: Analysis }) {
+  const [minX, minY, maxX, maxY] = analysis.bbox; const width = Math.max(maxX - minX, 1); const height = Math.max(maxY - minY, 1)
+  const project = (point: number[]) => ({ x: ((point[0] - minX) / width) * 100, y: 100 - ((point[1] - minY) / height) * 100 })
+  return <div className="drawing-preview"><svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-label="Detected drawing preview">{analysis.entities.map((entity) => { const g = entity.geometry ?? {}; if (g.kind === 'line' && g.start && g.end) { const a = project(g.start); const b = project(g.end); return <line key={entity.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} /> } if (g.kind === 'polyline' && g.points?.length) return <polyline key={entity.id} points={g.points.map((point) => { const p = project(point); return `${p.x},${p.y}` }).join(' ')} />; if (g.kind === 'circle' && g.center && g.radius) { const p = project(g.center); return <circle key={entity.id} cx={p.x} cy={p.y} r={(g.radius / width) * 100} /> } return null })}</svg></div>
 }
 
 function App() {
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [analysis, setAnalysis] = useState<Analysis | null>(null)
-  const [pdfResult, setPdfResult] = useState<PdfResult | null>(null)
-  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const handleAnalyze = async () => {
-    if (!selectedFile) {
-      setError('Choose a DXF file before analyzing.')
-      return
-    }
-
-    setIsAnalyzing(true)
-    setError(null)
-    setAnalysis(null)
-    setPdfResult(null)
-    setPdfBlob(null)
-
+  const [project, setProject] = useState<Project | null>(null); const [projectName, setProjectName] = useState('New CAD Project'); const [files, setFiles] = useState<File[]>([]); const [analysis, setAnalysis] = useState<Analysis | null>(null); const [selectedDrawing, setSelectedDrawing] = useState<Drawing | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
+  const createAndUpload = async () => {
+    if (!files.length) { setError('Choose one or more DXF files.'); return }; setBusy(true); setError(null)
     try {
-      const formData = new FormData()
-      formData.append('file', selectedFile)
-
-      const uploadResponse = await fetch(`${apiBaseUrl}/upload`, {
-        method: 'POST',
-        body: formData,
-      })
-      if (!uploadResponse.ok) {
-        throw new Error(await getApiError(uploadResponse, 'The file upload failed.'))
-      }
-      const { upload_id: uploadId } = (await uploadResponse.json()) as UploadResult
-
-      const analysisResponse = await fetch(`${apiBaseUrl}/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: uploadId }),
-      })
-      if (!analysisResponse.ok) {
-        throw new Error(await getApiError(analysisResponse, 'The backend could not analyze this drawing.'))
-      }
-
-      setAnalysis((await analysisResponse.json()) as Analysis)
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Something went wrong.')
-    } finally {
-      setIsAnalyzing(false)
-    }
+      const created = await fetch(`${apiBaseUrl}/projects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: projectName }) }); if (!created.ok) throw new Error(await apiError(created, 'Could not create project.')); const newProject = await created.json() as Project
+      const form = new FormData(); files.forEach((file) => form.append('files', file)); const uploaded = await fetch(`${apiBaseUrl}/projects/${newProject.id}/drawings`, { method: 'POST', body: form }); if (!uploaded.ok) throw new Error(await apiError(uploaded, 'Could not upload drawings.')); const result = await uploaded.json() as { drawings: Drawing[] }; setProject({ ...newProject, drawings: result.drawings }); setFiles([])
+    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Something went wrong.') } finally { setBusy(false) }
   }
-
-  const handleGeneratePdf = async () => {
-    setIsGenerating(true)
-    setError(null)
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/generate-pdf`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: analysis?.upload_id }),
-      })
-      if (!response.ok) {
-        throw new Error('The backend could not generate the PDF.')
-      }
-
-      const contentType = response.headers.get('content-type') ?? ''
-      if (!contentType.includes('application/pdf')) {
-        throw new Error('The backend did not return a PDF file.')
-      }
-
-      const filename = response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1]
-        ?? 'drawing.pdf'
-      setPdfResult({ status: 'pdf_ready', filename })
-      setPdfBlob(await response.blob())
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Something went wrong.')
-    } finally {
-      setIsGenerating(false)
-    }
-  }
-
-  const getPdfUrl = () => (pdfBlob ? URL.createObjectURL(pdfBlob) : null)
-
-  const handlePreviewPdf = () => {
-    const pdfUrl = getPdfUrl()
-    if (pdfUrl) {
-      window.open(pdfUrl, '_blank', 'noopener,noreferrer')
-    }
-  }
-
-  const handleDownloadPdf = () => {
-    const pdfUrl = getPdfUrl()
-    if (!pdfUrl || !pdfResult) return
-
-    const link = document.createElement('a')
-    link.href = pdfUrl
-    link.download = pdfResult.filename
-    link.click()
-    URL.revokeObjectURL(pdfUrl)
-  }
-
-  return (
-    <main className="app-shell">
-      <section className="panel">
-        <div className="panel-header">CAD Drawing → PDF</div>
-
-        <div className="upload-box">
-          <label className="label">Upload your DXF file</label>
-          <div className="file-input-wrap">
-            <input
-              type="file"
-              accept=".dxf"
-              onChange={(event) => {
-                setSelectedFile(event.target.files?.[0] ?? null)
-                setError(null)
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="selected-file">
-          Selected file: {selectedFile?.name ?? 'No file selected'}
-        </div>
-
-          <button className="primary-button" onClick={handleAnalyze} disabled={isAnalyzing}>
-            {isAnalyzing ? 'Analyzing…' : 'Analyze Drawing'}
-        </button>
-          {error && <div className="error-message" role="alert">{error}</div>}
-      </section>
-
-      {analysis && (
-        <section className="panel results">
-          <div className="panel-header">Drawing Analysis</div>
-
-          <div className="metrics">
-            <div>Entities detected: {analysis.entities_detected.toLocaleString()}</div>
-            <div>Candidate drawing clusters: {analysis.candidate_drawing_clusters}</div>
-            <div>Selected primary cluster: {analysis.selected_primary_cluster}</div>
-            <div>
-              Part dimensions: {analysis.dimensions_detected > 0
-                ? `${analysis.detailed_dimensions.length > 0
-                  ? analysis.detailed_dimensions.map((value) => value.toFixed(2).replace(/\.?0+$/, '')).join(', ')
-                  : `${analysis.dimensions_detected} detected`}`
-                : 'None detected'}
-            </div>
-            <div>Annotations detected: {analysis.annotations_detected}</div>
-            <div>Drawing size: {analysis.drawing_size.width} × {analysis.drawing_size.height} CAD units</div>
-          </div>
-
-          <button className="primary-button" onClick={handleGeneratePdf} disabled={isGenerating}>
-            {isGenerating ? 'Generating…' : 'Generate PDF'}
-          </button>
-        </section>
-      )}
-
-      {pdfResult && (
-        <section className="panel preview-panel">
-          <div className="panel-header">PDF Ready</div>
-          <div className="selected-file">Generated file: {pdfResult.filename}</div>
-          <div className="preview-actions">
-            <button type="button" className="secondary-button" onClick={handlePreviewPdf} disabled={!pdfBlob}>
-              Preview
-            </button>
-            <button type="button" className="secondary-button" onClick={handleDownloadPdf} disabled={!pdfBlob}>
-              Download PDF
-            </button>
-          </div>
-        </section>
-      )}
-    </main>
-  )
+  const inspect = async (drawing: Drawing) => { if (drawing.status !== 'COMPLETED') return; setSelectedDrawing(drawing); setBusy(true); setError(null); try { const response = await fetch(`${apiBaseUrl}/drawings/${drawing.id}/analyze`, { method: 'POST' }); if (!response.ok) throw new Error(await apiError(response, 'Could not analyze drawing.')); setAnalysis(await response.json() as Analysis) } catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Could not load drawing.') } finally { setBusy(false) } }
+  const counts = project?.drawings.reduce((result, drawing) => { result[drawing.status] = (result[drawing.status] ?? 0) + 1; return result }, {} as Record<string, number>) ?? {}
+  return <main className="app-shell"><header className="hero"><div><div className="eyebrow">ARECON / PHASE 1</div><h1>CAD Project Analyzer</h1></div><p>Ingest a project’s drawings and inspect each file independently.</p></header><section className="upload-panel"><div><div className="section-kicker">New project</div><h2>Create a drawing registry</h2></div><input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Project name" /><input type="file" accept=".dxf" multiple onChange={(event) => setFiles(Array.from(event.target.files ?? []))} /><div className="upload-row"><span>{files.length ? `${files.length} file(s) ready` : 'No files selected'}</span><button className="primary-button" onClick={createAndUpload} disabled={busy}>{busy ? 'Processing...' : 'Process Files'}</button></div>{error && <div className="error-message" role="alert">{error}</div>}</section>{project && <><section className="project-heading"><div><div className="section-kicker">Project registry</div><h2>{project.name}</h2></div><div className="project-counts">{project.drawings.length} drawings · {counts.COMPLETED ?? 0} completed · {counts.FAILED ?? 0} failed</div></section><section className="project-layout"><div className="panel drawing-list"><div className="section-kicker">Drawings</div>{project.drawings.map((drawing, index) => <button className={`drawing-row ${selectedDrawing?.id === drawing.id ? 'selected' : ''}`} key={drawing.id} onClick={() => inspect(drawing)}><span>{String(index + 1).padStart(2, '0')} {drawing.filename}</span><b className={`status ${drawing.status.toLowerCase()}`}>{drawing.status}</b>{drawing.error && <small>{drawing.error}</small>}</button>)}</div>{analysis && <div className="panel detail-panel"><div className="section-kicker">Drawing detail</div><h2>{analysis.file.name}</h2><div className="stats-grid"><div className="stat"><span>Entities</span><strong>{analysis.entities_detected}</strong></div><div className="stat"><span>Layers</span><strong>{analysis.file.layer_count}</strong></div><div className="stat"><span>Dimensions</span><strong>{analysis.dimensions_detected}</strong></div><div className="stat"><span>Size</span><strong>{formatBytes(analysis.file.size_bytes)}</strong></div></div><Preview analysis={analysis} /><dl className="detail-list"><dt>DXF version</dt><dd>{analysis.file.dxf_version}</dd><dt>Units</dt><dd>{analysis.file.units}</dd><dt>Detected bounds</dt><dd>{formatNumber(analysis.drawing_size.width)} × {formatNumber(analysis.drawing_size.height)}</dd><dt>Line length</dt><dd>{formatNumber(analysis.geometry_summary.total_line_length)}</dd></dl><h3>Dimensions</h3>{analysis.dimensions.map((dimension) => <div className="table-row" key={dimension.id}><span>{dimension.value != null ? formatNumber(dimension.value) : dimension.text || 'Unresolved'}</span><small>{dimension.status} / {dimension.layer}</small></div>)}<h3>Layers</h3>{analysis.layers.map((layer) => <div className="table-row" key={layer.name}><span>{layer.name}<small>{layer.entity_types.join(', ')}</small></span><strong>{layer.entity_count}</strong></div>)}</div>}</section></>}</main>
 }
-
 export default App
