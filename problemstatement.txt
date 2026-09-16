@@ -1,0 +1,1389 @@
+# CAD-to-PDF Intelligent Drawing Framing MVP
+
+## 1. Project Overview
+
+Build a desktop/web application that accepts a CAD drawing file and generates a clean, properly framed PDF containing the actual drawing and its associated dimensions.
+
+The primary problem is that architectural CAD files are sometimes saved with an extremely zoomed-out view, incorrect extents, stray geometry, or objects located very far away from the main drawing. When these files are converted directly to PDF using their raw drawing extents, the actual drawing can become extremely small, partially invisible, or appear blank.
+
+The first version of this application must solve that problem **without using AI or machine learning**.
+
+The system should inspect the CAD file's actual geometric entities, determine where the meaningful drawing is located, identify associated dimensions/text, calculate an appropriate drawing boundary, and generate a readable PDF.
+
+---
+
+# 2. MVP Goal
+
+The MVP should accomplish the following workflow:
+
+```text
+CAD file
+   ↓
+Parse CAD entities
+   ↓
+Analyze geometry
+   ↓
+Detect main drawing region
+   ↓
+Ignore distant/irrelevant stray geometry
+   ↓
+Detect dimensions and annotation objects
+   ↓
+Expand drawing bounds to preserve relevant annotations
+   ↓
+Automatically frame the drawing
+   ↓
+Generate PDF
+```
+
+The MVP should support **DXF first**.
+
+Do NOT implement DWG parsing in the initial version unless the selected library provides it cleanly without requiring a complicated commercial integration.
+
+The architecture should, however, be designed so DWG support can be added later.
+
+---
+
+# 3. Problem Statement
+
+Architectural CAD drawings may contain:
+
+* The actual floor plan or architectural drawing
+* Dimension entities
+* Text and annotations
+* Title blocks
+* Borders
+* Construction/reference geometry
+* Hidden or unused layers
+* Blocks
+* Stray lines
+* Objects accidentally placed thousands of CAD units away
+* Previous drawings or copied geometry
+* Other unrelated objects
+
+A naive PDF conversion usually calculates the complete CAD bounding box:
+
+```text
+minX → maxX
+minY → maxY
+```
+
+If even one unrelated object is extremely far away, the main drawing becomes tiny in the generated PDF.
+
+Example:
+
+```text
+                         stray object
+                              X
+
+
+        ┌──────────────────────────┐
+        │                          │
+        │       MAIN DRAWING       │
+        │                          │
+        └──────────────────────────┘
+```
+
+The application must identify the meaningful drawing rather than blindly using the overall CAD extents.
+
+---
+
+# 4. What the MVP Must NOT Do
+
+Do not implement the following yet:
+
+* No LLM
+* No generative AI
+* No computer vision
+* No OCR
+* No image-based architectural recognition
+* No semantic AI object classification
+* No RAG
+* No cloud AI APIs
+* No automatic natural-language interpretation of drawings
+
+The objective is to determine how well the problem can be solved using deterministic CAD geometry alone.
+
+---
+
+# 5. Technology Stack
+
+Use the following stack.
+
+## Backend
+
+### Python
+
+Use Python 3.11+.
+
+### FastAPI
+
+Use FastAPI to expose the processing pipeline through REST APIs.
+
+Main responsibilities:
+
+* File upload
+* CAD parsing
+* Geometry analysis
+* Drawing detection
+* Dimension extraction
+* PDF generation
+* Returning processing results and metadata
+
+---
+
+# 6. CAD Processing
+
+## Primary format
+
+Support:
+
+```text
+DXF
+```
+
+Use:
+
+```text
+ezdxf
+```
+
+for DXF parsing.
+
+The implementation must inspect CAD entities rather than rendering the CAD file to an image first.
+
+Initially support common entities including:
+
+```text
+LINE
+LWPOLYLINE
+POLYLINE
+ARC
+CIRCLE
+ELLIPSE
+SPLINE
+TEXT
+MTEXT
+DIMENSION
+INSERT
+HATCH
+POINT
+```
+
+Unsupported entity types should not crash the application.
+
+Log them and continue processing.
+
+---
+
+# 7. Geometry Processing
+
+Use:
+
+```text
+Shapely
+NumPy
+SciPy
+scikit-learn
+```
+
+where useful.
+
+Use Shapely for:
+
+* Bounding boxes
+* Geometry relationships
+* Distances
+* Intersections
+* Buffering
+* Spatial operations
+
+Use NumPy for coordinate and numerical calculations.
+
+Use scikit-learn for DBSCAN clustering where useful.
+
+A spatial index such as an R-tree/STRtree should be used when appropriate so the application does not repeatedly compare every entity with every other entity.
+
+---
+
+# 8. Core Data Model
+
+Create internal Python models for CAD entities.
+
+Example:
+
+```python
+class CadEntity:
+    id: str
+    entity_type: str
+    layer: str | None
+    geometry: object | None
+    bbox: tuple[float, float, float, float] | None
+    metadata: dict
+```
+
+Dimensions should have their own model.
+
+Example:
+
+```python
+class CadDimension:
+    id: str
+    value: float | None
+    text: str | None
+    dimension_type: str
+    geometry: object | None
+    bbox: tuple[float, float, float, float] | None
+    definition_points: list[tuple[float, float]]
+```
+
+The exact structure can be adjusted to what ezdxf exposes.
+
+---
+
+# 9. Entity Extraction
+
+Build an extraction layer:
+
+```text
+DXF
+ ↓
+Entity Extractor
+ ↓
+Normalized internal representation
+```
+
+For each entity, extract where possible:
+
+* Entity type
+* Layer name
+* Handle/unique ID
+* Coordinates
+* Bounding box
+* Text contents
+* Dimension data
+* Block name
+* Geometric representation
+
+Do not make downstream processing depend directly on ezdxf objects wherever possible.
+
+Create a normalized internal representation so the rest of the application is easier to test.
+
+---
+
+# 10. Main Drawing Detection
+
+This is the most important feature of the MVP.
+
+The application must determine which region of the CAD file represents the primary drawing.
+
+Do NOT simply use:
+
+```python
+overall_bbox(all_entities)
+```
+
+Instead create a dedicated:
+
+```text
+DrawingDetector
+```
+
+module.
+
+---
+
+# 11. First Drawing Detection Strategy
+
+Implement a multi-stage deterministic approach.
+
+## Stage A — Filter unusable entities
+
+Exclude or deprioritize:
+
+* POINT entities with no meaningful surrounding geometry
+* Zero-length lines
+* Extremely tiny isolated entities
+* Empty text
+* Invisible/deactivated entities where detectable
+* Entities on obviously irrelevant layers when layer metadata allows that determination
+
+Do not permanently discard potentially useful geometry without logging the decision.
+
+---
+
+# 12. Geometry Weighting
+
+Assign different weights to entities when determining which spatial cluster is likely to be the main drawing.
+
+For example:
+
+```text
+LINE         high
+LWPOLYLINE   high
+POLYLINE     high
+ARC          medium/high
+CIRCLE       medium
+HATCH        medium
+TEXT         medium
+DIMENSION    medium/high
+POINT        low
+```
+
+These are heuristics, not fixed truth.
+
+Make the weights configurable.
+
+Example configuration:
+
+```yaml
+entity_weights:
+  LINE: 5
+  LWPOLYLINE: 5
+  POLYLINE: 5
+  ARC: 4
+  CIRCLE: 3
+  HATCH: 3
+  DIMENSION: 4
+  TEXT: 2
+  POINT: 1
+```
+
+---
+
+# 13. Spatial Clustering
+
+Use spatial clustering to identify groups of nearby geometry.
+
+A first implementation should use DBSCAN or a comparable clustering approach.
+
+Important:
+
+Do not cluster only entity center points.
+
+Consider:
+
+* Entity bounding boxes
+* Entity geometry
+* Entity lengths/areas
+* Proximity between geometries
+
+A large wall should influence clustering even if its midpoint is relatively far from another entity.
+
+The clustering distance should be adaptive where possible based on drawing scale/geometry size.
+
+Avoid hardcoding a single universal distance such as:
+
+```text
+epsilon = 10
+```
+
+because CAD units can be:
+
+* millimeters
+* centimeters
+* meters
+* inches
+* feet
+* arbitrary drawing units
+
+Create a strategy that estimates a reasonable spatial scale from the drawing itself.
+
+---
+
+# 14. Candidate Drawing Clusters
+
+After clustering, calculate statistics for each cluster:
+
+```text
+cluster_id
+entity_count
+weighted_entity_count
+bbox
+bbox_width
+bbox_height
+bbox_area
+total_geometry_length
+total_geometry_area
+dimension_count
+text_count
+layer_count
+density
+```
+
+The primary drawing candidate should be selected using a configurable deterministic scoring function.
+
+Example concept:
+
+```text
+score =
+    geometry_weight
+  + entity_density_weight
+  + dimension_weight
+  + text_weight
+  + cluster_size_weight
+```
+
+Do NOT use an AI model.
+
+Do NOT return a political-style "best" ranking; this is an internal engineering heuristic and should simply select a candidate according to explicit technical criteria.
+
+---
+
+# 15. Preventing Stray Objects From Winning
+
+The system should handle cases such as:
+
+```text
+Main drawing:
+500 entities
+
+Stray object:
+1 line
+
+Title:
+20 text entities
+
+Random copied object:
+5 entities
+```
+
+The main drawing should generally win because it has substantially more connected/nearby meaningful geometry.
+
+However, don't simply select the cluster with the most entities.
+
+A title block may contain lots of text, while the actual geometry may contain fewer entities.
+
+Give geometric structure more weight than text quantity.
+
+---
+
+# 16. Connected Geometry Analysis
+
+After selecting a candidate cluster, perform a second analysis of geometry connectivity.
+
+Two entities can be considered connected or related when:
+
+* They intersect
+* Their endpoints are extremely close
+* Their buffered geometries overlap
+* Their bounding boxes are sufficiently close
+
+This is especially useful for architectural drawings where walls form connected networks.
+
+Create a configurable geometric tolerance.
+
+Example:
+
+```python
+GEOMETRY_TOLERANCE = ...
+```
+
+Do not assume the value represents a real-world unit such as feet.
+
+---
+
+# 17. Detect the Main Drawing Boundary
+
+Once the primary drawing cluster has been detected:
+
+```text
+primary geometry
+      ↓
+primary bounding box
+```
+
+Calculate:
+
+```text
+min_x
+max_x
+min_y
+max_y
+```
+
+However, this should NOT yet be the final PDF boundary.
+
+Dimensions and annotations frequently exist outside the geometry.
+
+---
+
+# 18. Dimension Detection
+
+Extract actual DXF DIMENSION entities whenever possible.
+
+Do not OCR dimension text if the dimension exists as a native CAD dimension.
+
+For each dimension, collect:
+
+* Dimension type
+* Measurement value
+* Display text
+* Definition points
+* Dimension line geometry
+* Extension lines where available
+* Bounding box
+* Layer
+* Orientation
+
+Support at minimum:
+
+```text
+Linear dimensions
+Aligned dimensions
+Angular dimensions
+Radial dimensions
+Diameter dimensions
+```
+
+For the MVP, the most important are:
+
+```text
+Linear
+Aligned
+```
+
+---
+
+# 19. Dimension Association
+
+The initial version should attempt deterministic dimension-to-geometry association.
+
+Example:
+
+```text
+               30'-0"
+          <------------>
+
+          ┌──────────────┐
+          │              │
+          │              │
+          └──────────────┘
+```
+
+The expected result is:
+
+```text
+dimension:
+30 ft
+
+associated geometry:
+top horizontal wall / line
+```
+
+Use several signals.
+
+### Signal 1 — Dimension definition points
+
+Check whether the dimension's extension/definition points correspond to endpoints or points along nearby geometry.
+
+### Signal 2 — Distance
+
+Calculate distance between the dimension geometry and nearby drawing geometry.
+
+### Signal 3 — Orientation
+
+For a horizontal dimension, prioritize horizontal geometry.
+
+For a vertical dimension, prioritize vertical geometry.
+
+### Signal 4 — Layer
+
+If the geometry is on a likely wall layer and the dimension lies near it, increase the association confidence.
+
+### Signal 5 — Intersection/projection
+
+Project dimension endpoints onto nearby line/polyline geometry and determine whether the projection lies on the geometry.
+
+### Signal 6 — Relative location
+
+Determine whether the dimension is:
+
+```text
+above
+below
+left
+right
+```
+
+relative to the associated geometry.
+
+---
+
+# 20. Dimension Association Output
+
+Return structured data.
+
+Example:
+
+```json
+{
+  "dimension_id": "dim_001",
+  "value": 30.0,
+  "unit": "ft",
+  "associated_entity_id": "wall_014",
+  "relationship": "length",
+  "relative_position": "left",
+  "confidence": 0.94
+}
+```
+
+Do not call the object "wall" unless there is reasonable deterministic evidence for that classification.
+
+In early versions, generic names are acceptable:
+
+```text
+Entity 014
+Horizontal segment
+Vertical segment
+```
+
+Layer information can later improve semantic naming.
+
+---
+
+# 21. Naming Objects Without AI
+
+Implement basic deterministic naming.
+
+For example:
+
+```text
+Horizontal exterior-looking line:
+Top Wall / Bottom Wall
+
+Vertical:
+Left Wall / Right Wall
+```
+
+But only use "Wall" when layer data or other evidence supports it.
+
+Otherwise use:
+
+```text
+Top Horizontal Edge
+Left Vertical Edge
+```
+
+For a first MVP, object naming can remain basic.
+
+The critical goal is correct geometry-dimension association.
+
+---
+
+# 22. Dimension Inclusion in Bounding Box
+
+After finding the main drawing geometry:
+
+1. Find dimensions associated with the primary drawing.
+2. Find annotations/text that are sufficiently close to the primary drawing.
+3. Include them in the final crop.
+
+For example:
+
+```text
+Geometry bbox
++
+associated dimension bbox
++
+nearby annotation bbox
+```
+
+Do NOT include every text/dimension entity in the entire CAD file.
+
+Only include objects that are spatially related to the main drawing.
+
+---
+
+# 23. Annotation Filtering
+
+A text annotation should be considered relevant based on factors such as:
+
+* Distance from main drawing
+* Proximity to primary cluster
+* Layer
+* Position
+* Whether it overlaps/intersects the drawing region
+* Whether it is referenced by an associated dimension
+* Whether it belongs to an INSERT/block inside the drawing
+
+This is critical for excluding title blocks or unrelated distant annotations.
+
+---
+
+# 24. PDF Framing
+
+Generate a PDF using the final calculated bounds.
+
+The output should:
+
+* Center the drawing
+* Preserve aspect ratio
+* Include dimensions
+* Include relevant annotations
+* Avoid excessive blank space
+* Avoid clipping geometry
+* Avoid clipping dimension text
+* Automatically select portrait or landscape
+* Fit the drawing to the selected paper size
+
+Initially support:
+
+```text
+A4
+A3
+A2
+A1
+A0
+```
+
+Allow:
+
+```text
+Portrait
+Landscape
+Auto
+```
+
+---
+
+# 25. Scale Handling
+
+The MVP should support an automatic fit-to-page mode.
+
+Do not rely on the CAD file's saved zoom level.
+
+The generated PDF should be based on the detected extents.
+
+The system should preserve the CAD coordinate proportions.
+
+A future version can add architectural plotting scales such as:
+
+```text
+1:50
+1:100
+1:200
+1/4" = 1'-0"
+1/8" = 1'-0"
+```
+
+For the initial MVP, prioritize correct framing over perfect architectural plotting standards.
+
+---
+
+# 26. PDF Generation
+
+Use a reliable Python PDF library.
+
+Preferred options:
+
+```text
+ReportLab
+```
+
+or another appropriate vector-capable PDF solution.
+
+The output should ideally retain vector geometry rather than rasterizing the entire drawing into a bitmap.
+
+Create a rendering abstraction so the PDF renderer can be replaced later if necessary.
+
+---
+
+# 27. Base UI
+
+Build a simple web UI.
+
+Use:
+
+```text
+React
+TypeScript
+Vite
+```
+
+Keep the UI intentionally simple.
+
+## Main screen
+
+Display:
+
+```text
+--------------------------------------------------
+ CAD Drawing → PDF
+--------------------------------------------------
+
+ Upload your DXF file
+
+       [ Choose File ]
+
+--------------------------------------------------
+
+ Selected file:
+ house_plan.dxf
+
+ [ Analyze Drawing ]
+
+--------------------------------------------------
+```
+
+After analysis:
+
+```text
+--------------------------------------------------
+ Drawing Analysis
+--------------------------------------------------
+
+ Entities detected: 1,245
+ Candidate drawing clusters: 4
+ Selected primary cluster: Cluster 2
+
+ Dimensions detected: 24
+ Associated dimensions: 19
+
+ Drawing size:
+ 32.4 × 21.7 CAD units
+
+--------------------------------------------------
+
+ [ Generate PDF ]
+
+--------------------------------------------------
+```
+
+After generation:
+
+```text
+--------------------------------------------------
+ PDF Ready
+
+ [ Preview ]
+
+ [ Download PDF ]
+
+--------------------------------------------------
+```
+
+---
+
+# 28. Visual Preview
+
+The UI should include a basic preview of the detected drawing boundary before generating the PDF.
+
+It does not need to be beautiful.
+
+A simple SVG or canvas preview is sufficient.
+
+Show:
+
+```text
+Main drawing
+Bounding box
+Dimensions
+Potential excluded regions
+```
+
+Use different visual indicators for:
+
+```text
+Primary drawing
+Detected dimensions
+Excluded distant geometry
+```
+
+The preview should help debug the detection algorithm.
+
+---
+
+# 29. Debug Mode
+
+Add a debug mode to the backend.
+
+When enabled, save a diagnostic representation of:
+
+```text
+All entities
+Cluster boundaries
+Selected cluster
+Final crop boundary
+Associated dimensions
+Rejected geometry
+```
+
+This is extremely important during development.
+
+We need to visually inspect why the detector succeeded or failed.
+
+The API should be able to return or generate a debug image/SVG.
+
+---
+
+# 30. API Design
+
+Create endpoints such as:
+
+```text
+POST /api/upload
+POST /api/analyze
+POST /api/generate-pdf
+GET  /api/result/{id}
+GET  /api/preview/{id}
+GET  /api/debug/{id}
+```
+
+The exact API structure can be improved as needed.
+
+Do not build a complicated authentication system for the MVP.
+
+---
+
+# 31. Project Structure
+
+Use a clean modular architecture.
+
+Suggested structure:
+
+```text
+cad-pdf-tool/
+│
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── api/
+│   │   │   ├── routes_upload.py
+│   │   │   ├── routes_analysis.py
+│   │   │   └── routes_pdf.py
+│   │   │
+│   │   ├── cad/
+│   │   │   ├── parser.py
+│   │   │   ├── entities.py
+│   │   │   ├── dimensions.py
+│   │   │   └── layers.py
+│   │   │
+│   │   ├── geometry/
+│   │   │   ├── bbox.py
+│   │   │   ├── clustering.py
+│   │   │   ├── connectivity.py
+│   │   │   └── spatial_index.py
+│   │   │
+│   │   ├── detection/
+│   │   │   ├── drawing_detector.py
+│   │   │   ├── scoring.py
+│   │   │   └── annotation_filter.py
+│   │   │
+│   │   ├── association/
+│   │   │   └── dimension_association.py
+│   │   │
+│   │   ├── rendering/
+│   │   │   ├── preview.py
+│   │   │   └── pdf_renderer.py
+│   │   │
+│   │   ├── models/
+│   │   │   └── schemas.py
+│   │   │
+│   │   └── config.py
+│   │
+│   ├── tests/
+│   │
+│   └── requirements.txt
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── services/
+│   │   └── types/
+│   │
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── sample_data/
+│
+├── docs/
+│
+└── README.md
+```
+
+---
+
+# 32. Testing Requirements
+
+Create unit tests for:
+
+### Geometry
+
+* Bounding box calculation
+* Line intersection
+* Endpoint matching
+* Distance calculations
+* Geometry tolerance
+
+### Clustering
+
+* Main drawing + distant stray object
+* Multiple nearby clusters
+* Title block + main drawing
+* Sparse drawings
+
+### Dimensions
+
+* Horizontal dimension
+* Vertical dimension
+* Dimension endpoint matching
+* Dimension association failure
+
+### PDF
+
+* Drawing completely visible
+* No clipping
+* Correct landscape/portrait selection
+* Relevant dimension annotations retained
+
+---
+
+# 33. Important Test Cases
+
+Create synthetic DXF test files or fixtures for at least:
+
+## Test 1 — Normal drawing
+
+```text
+Main floor plan
+No stray geometry
+```
+
+Expected:
+
+```text
+Entire drawing correctly framed
+```
+
+## Test 2 — Far-away object
+
+```text
+Main floor plan
+
+                   random line
+```
+
+Expected:
+
+```text
+Random line excluded
+```
+
+## Test 3 — Far-away multiple objects
+
+Expected:
+
+```text
+Main drawing selected
+```
+
+## Test 4 — Dimensions outside geometry
+
+```text
+30'-0"
+<------------>
+
+┌────────────┐
+│            │
+└────────────┘
+```
+
+Expected:
+
+```text
+Dimension retained
+```
+
+## Test 5 — Title block
+
+```text
+Main drawing
++
+title block
+```
+
+Expected behavior should be configurable.
+
+Initially, preserve the title block only when it is sufficiently connected/relevant to the primary drawing.
+
+## Test 6 — Multiple legitimate drawings
+
+Example:
+
+```text
+Floor Plan
+Elevation
+Section
+```
+
+The detector should not silently merge everything into one giant bounding box.
+
+The analysis layer should identify multiple candidate drawing clusters.
+
+The UI should display them as selectable candidates.
+
+---
+
+# 34. Multiple Drawing Support
+
+The architecture must allow:
+
+```text
+Candidate 1
+Candidate 2
+Candidate 3
+```
+
+Even if the MVP initially chooses only the primary candidate automatically.
+
+For example:
+
+```text
+Detected drawings:
+
+1. Ground Floor Plan
+2. First Floor Plan
+3. Elevation
+```
+
+The user should eventually be able to select which one to export.
+
+For MVP UI, showing:
+
+```text
+Primary Drawing
+Alternative Candidates
+```
+
+is sufficient.
+
+---
+
+# 35. Logging
+
+Add structured logging.
+
+Log things such as:
+
+```text
+Uploaded file
+DXF entity counts
+Unsupported entities
+Cluster statistics
+Selected cluster
+Primary bounding box
+Dimensions detected
+Dimension associations
+Final PDF bounds
+Processing time
+```
+
+Example:
+
+```text
+[INFO] DXF parsed: 1245 entities
+[INFO] Candidate clusters: 4
+[INFO] Primary cluster: 2
+[INFO] Primary geometry bbox: ...
+[INFO] Dimensions detected: 24
+[INFO] Associations successful: 19/24
+[INFO] Final PDF bbox: ...
+```
+
+---
+
+# 36. Performance
+
+The application should be designed to handle reasonably large DXF drawings.
+
+Avoid O(n²) operations wherever possible.
+
+Use spatial indexes for nearest geometry queries.
+
+Do not repeatedly calculate distances between every dimension and every entity.
+
+The implementation should be modular enough that spatial optimization can be added without rewriting the detection engine.
+
+---
+
+# 37. Error Handling
+
+The application must gracefully handle:
+
+* Invalid DXF
+* Empty DXF
+* DXF with no geometry
+* DXF with only text
+* Unsupported entity types
+* Corrupted dimensions
+* Missing coordinates
+* Extremely large coordinate ranges
+* Units unavailable/unknown
+
+Example:
+
+```text
+Unable to detect a primary drawing.
+
+The file contains geometry, but no sufficiently connected drawing region could be identified.
+```
+
+Do not generate a misleading blank PDF.
+
+---
+
+# 38. Units
+
+Do not assume all CAD files use feet.
+
+Detect units from DXF metadata when available.
+
+Possible units:
+
+```text
+unitless
+inches
+feet
+millimeters
+centimeters
+meters
+```
+
+Store the raw CAD value separately from the interpreted unit.
+
+Example:
+
+```json
+{
+  "raw_value": 360,
+  "raw_unit": "drawing_units",
+  "display_value": "30 ft"
+}
+```
+
+Never silently convert units if the drawing unit is unknown.
+
+---
+
+# 39. Dimension Output
+
+The analysis API should return information like:
+
+```json
+{
+  "drawing": {
+    "bbox": {
+      "min_x": 10,
+      "min_y": 5,
+      "max_x": 150,
+      "max_y": 100
+    }
+  },
+  "dimensions": [
+    {
+      "id": "dim_001",
+      "display_text": "30'-0\"",
+      "value": 30,
+      "unit": "ft",
+      "associated_entity": "entity_102",
+      "relationship": "length",
+      "relative_position": "left",
+      "confidence": 0.94
+    }
+  ]
+}
+```
+
+---
+
+# 40. Success Criteria
+
+The MVP is considered successful when:
+
+### Drawing framing
+
+The system can correctly exclude distant stray geometry from the PDF in common architectural CAD files.
+
+### Visibility
+
+The main drawing is clearly visible and occupies a sensible amount of the generated page.
+
+### Dimensions
+
+Native CAD dimensions are preserved in the PDF.
+
+### Association
+
+The system can associate a meaningful percentage of simple linear dimensions with their nearby geometry using deterministic rules.
+
+### No AI
+
+The complete MVP works without any AI model or external AI API.
+
+---
+
+# 41. Development Priority
+
+Implement in this exact order:
+
+```text
+1. Project scaffolding
+2. DXF upload
+3. DXF entity parsing
+4. Normalized entity representation
+5. Basic geometry extraction
+6. Overall bounding-box visualization
+7. Spatial clustering
+8. Primary drawing detection
+9. Dimension extraction
+10. Dimension-to-geometry association
+11. Final intelligent bounding box
+12. PDF rendering
+13. Preview UI
+14. Debug visualization
+15. Automated tests
+16. Multiple candidate drawing support
+```
+
+Do not jump directly to AI or complex semantic recognition.
+
+---
+
+# 42. First Deliverable
+
+The first implementation should result in a working application that allows me to:
+
+1. Open the web UI.
+2. Upload a DXF file.
+3. Analyze the CAD file.
+4. See the detected primary drawing.
+5. See the calculated drawing boundary.
+6. See detected dimensions.
+7. See dimension associations where possible.
+8. Generate a PDF.
+9. Download the PDF.
+10. Inspect debug information when detection fails.
+
+---
+
+# 43. Engineering Principle
+
+The most important principle for this project is:
+
+> Preserve deterministic CAD information whenever it exists. Do not infer visually what can be obtained directly from CAD entities.
+
+The first objective is to establish a strong geometric baseline.
+
+After enough real-world CAD files have been tested, we will evaluate:
+
+```text
+What does deterministic geometry solve well?
+What cases does it fail on?
+Where would AI actually add value?
+```
+
+Only after measuring these failures should an AI layer be introduced.
+
+Build the MVP cleanly so that an AI/vision layer can later be added as a separate module without replacing the core CAD processing engine.
