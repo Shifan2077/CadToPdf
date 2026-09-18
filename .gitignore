@@ -2,12 +2,15 @@
 .env.*
 !.env.example
 
+.pytest_cache/
 __pycache__/
 *.pyc
 
 node_modules/
 venv/
 .venv/
+
+backend/storage/
 
 .vscode/
 .idea/
